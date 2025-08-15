@@ -384,6 +384,23 @@ func (e *Endpoint) UniqueOrderedTargets() {
 func FilterEndpointsByOwnerID(ownerID string, eps []*Endpoint) []*Endpoint {
 	filtered := []*Endpoint{}
 	for _, ep := range eps {
+		// Special case: if this is a user TXT record (has no owner label or empty owner),
+		// and it doesn't look like a registry record, allow it through
+		if ep.RecordType == RecordTypeTXT {
+			endpointOwner, hasOwner := ep.Labels[OwnerLabelKey]
+			if !hasOwner || endpointOwner == "" {
+				// Check if this looks like user data vs registry data
+				if len(ep.Targets) > 0 {
+					target := ep.Targets[0]
+					// If it doesn't contain registry-style heritage info, treat as user TXT record
+					if !strings.Contains(target, "heritage=external-dns") && !strings.Contains(target, "external-dns/owner=") {
+						filtered = append(filtered, ep)
+						continue
+					}
+				}
+			}
+		}
+
 		if endpointOwner, ok := ep.Labels[OwnerLabelKey]; !ok || endpointOwner != ownerID {
 			log.Debugf(`Skipping endpoint %v because owner id does not match, found: "%s", required: "%s"`, ep, endpointOwner, ownerID)
 		} else {

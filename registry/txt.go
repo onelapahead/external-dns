@@ -156,7 +156,7 @@ func (im *TXTRegistry) Records(ctx context.Context) ([]*endpoint.Endpoint, error
 		// 1. Contains heritage info (unencrypted)
 		// 2. Could be encrypted content (looks like base64 and has reasonable length)
 		// 3. Has a registry-style DNS name (contains the prefix/suffix)
-		hasHeritageOwnerInfo := strings.HasPrefix(target, "\"heritage=external-dns,external-dns/owner=") // if a user puts this in their TXT record, they are asking for bugs :)
+		hasHeritageOwnerInfo := strings.Contains(target, "heritage=external-dns,external-dns/owner=") // if a user puts this in their TXT record, they are asking for bugs :)
 		endpointName, _ := im.mapper.toEndpointName(record.DNSName)
 		hasRegistryDNSName := endpointName != ""
 

@@ -19,6 +19,7 @@ package endpoint
 import (
 	"fmt"
 	"reflect"
+	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -1023,4 +1024,64 @@ func TestTargetsOrderPreservation(t *testing.T) {
 	assert.Equal(t, "other.text.woo=!", originalTargets[0], "Original first target should remain unchanged after reordered comparison")
 	assert.Equal(t, "please-delete all this", originalTargets[1], "Original second target should remain unchanged after reordered comparison")
 	assert.Equal(t, "other text", originalTargets[2], "Original third target should remain unchanged after reordered comparison")
+}
+
+// TestFilterEndpointsByOwnerIDUserTXTRecords tests that user TXT records without ownership are preserved
+func TestFilterEndpointsByOwnerIDUserTXTRecords(t *testing.T) {
+	ownerID := "test-owner"
+
+	endpoints := []*Endpoint{
+		// User TXT record - should be preserved even without owner ID
+		{
+			DNSName:    "peer1.example.com",
+			RecordType: RecordTypeTXT,
+			Targets:    Targets{"v=1;id=enode1;addr=/ip4/10.0.0.1/tcp/30303/p2p/Qm..."},
+			Labels:     map[string]string{}, // No owner label
+		},
+		// Registry TXT record without owner - should be filtered out
+		{
+			DNSName:    "registry.example.com",
+			RecordType: RecordTypeTXT,
+			Targets:    Targets{"heritage=external-dns,external-dns/owner=other-owner"},
+			Labels:     map[string]string{}, // No owner label
+		},
+		// Registry TXT record with correct owner - should be preserved
+		{
+			DNSName:    "owned.example.com",
+			RecordType: RecordTypeTXT,
+			Targets:    Targets{"heritage=external-dns,external-dns/owner=test-owner"},
+			Labels:     map[string]string{OwnerLabelKey: ownerID},
+		},
+		// Non-TXT record without owner - should be filtered out
+		{
+			DNSName:    "a-record.example.com",
+			RecordType: RecordTypeA,
+			Targets:    Targets{"1.2.3.4"},
+			Labels:     map[string]string{}, // No owner label
+		},
+		// Non-TXT record with correct owner - should be preserved
+		{
+			DNSName:    "owned-a.example.com",
+			RecordType: RecordTypeA,
+			Targets:    Targets{"1.2.3.4"},
+			Labels:     map[string]string{OwnerLabelKey: ownerID},
+		},
+	}
+
+	filtered := FilterEndpointsByOwnerID(ownerID, endpoints)
+
+	// Should have 3 endpoints: user TXT, owned registry TXT, and owned A record
+	assert.Len(t, filtered, 3)
+
+	// Check that we have the right endpoints
+	dnsNames := make([]string, len(filtered))
+	for i, ep := range filtered {
+		dnsNames[i] = ep.DNSName
+	}
+	sort.Strings(dnsNames)
+
+	expected := []string{"owned-a.example.com", "owned.example.com", "peer1.example.com"}
+	sort.Strings(expected)
+
+	assert.Equal(t, expected, dnsNames)
 }
