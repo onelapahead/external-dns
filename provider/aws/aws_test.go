@@ -2850,3 +2850,40 @@ func TestAWSProvider_createUpdateChanges_NewMoreThanOld(t *testing.T) {
 	require.Equal(t, 1, upserts, "should upsert the matching endpoint")
 	require.Equal(t, 0, deletes, "should not delete anything")
 }
+
+// TestTXTRecordQuoteWrapping tests that TXT records are automatically wrapped in quotes
+func TestTXTRecordQuoteWrapping(t *testing.T) {
+	provider := &AWSProvider{}
+
+	// Test TXT record without quotes
+	txtEndpoint := endpoint.NewEndpointWithTTL("test.example.com", endpoint.RecordTypeTXT, 300, "v=1;id=node1;addr=/ip4/10.0.0.1/tcp/30303")
+	change := provider.newChange(route53types.ChangeActionCreate, txtEndpoint)
+
+	require.Len(t, change.ResourceRecordSet.ResourceRecords, 1)
+	// Should be automatically wrapped in quotes
+	assert.Equal(t, "\"v=1;id=node1;addr=/ip4/10.0.0.1/tcp/30303\"", *change.ResourceRecordSet.ResourceRecords[0].Value)
+
+	// Test TXT record already with quotes - should not double-wrap
+	quotedTxtEndpoint := endpoint.NewEndpointWithTTL("test.example.com", endpoint.RecordTypeTXT, 300, "\"already quoted\"")
+	quotedChange := provider.newChange(route53types.ChangeActionCreate, quotedTxtEndpoint)
+
+	require.Len(t, quotedChange.ResourceRecordSet.ResourceRecords, 1)
+	// Should remain the same (not double-wrapped)
+	assert.Equal(t, "\"already quoted\"", *quotedChange.ResourceRecordSet.ResourceRecords[0].Value)
+
+	// Test multi-target TXT record
+	multiTxtEndpoint := endpoint.NewEndpointWithTTL("test.example.com", endpoint.RecordTypeTXT, 300, "first=value", "second=value")
+	multiChange := provider.newChange(route53types.ChangeActionCreate, multiTxtEndpoint)
+
+	require.Len(t, multiChange.ResourceRecordSet.ResourceRecords, 2)
+	assert.Equal(t, "\"first=value\"", *multiChange.ResourceRecordSet.ResourceRecords[0].Value)
+	assert.Equal(t, "\"second=value\"", *multiChange.ResourceRecordSet.ResourceRecords[1].Value)
+
+	// Test non-TXT record - should not be wrapped in quotes
+	aEndpoint := endpoint.NewEndpointWithTTL("test.example.com", endpoint.RecordTypeA, 300, "1.2.3.4")
+	aChange := provider.newChange(route53types.ChangeActionCreate, aEndpoint)
+
+	require.Len(t, aChange.ResourceRecordSet.ResourceRecords, 1)
+	// A record should not be wrapped in quotes
+	assert.Equal(t, "1.2.3.4", *aChange.ResourceRecordSet.ResourceRecords[0].Value)
+}

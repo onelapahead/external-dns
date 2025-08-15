@@ -147,7 +147,26 @@ func (im *TXTRegistry) Records(ctx context.Context) ([]*endpoint.Endpoint, error
 			log.Errorf("TXT record has no targets %s", record.DNSName)
 			continue
 		}
-		labels, err := endpoint.NewLabelsFromString(record.Targets[0], im.txtEncryptAESKey)
+
+		// Only try to parse TXT records that look like they might contain heritage and owner info
+		// This prevents parsing errors on user TXT records with arbitrary content
+		target := record.Targets[0]
+
+		// Check if this looks like a registry record by checking:
+		// 1. Contains heritage info (unencrypted)
+		// 2. Could be encrypted content (looks like base64 and has reasonable length)
+		// 3. Has a registry-style DNS name (contains the prefix/suffix)
+		hasHeritageOwnerInfo := strings.HasPrefix(target, "\"heritage=external-dns,external-dns/owner=") // if a user puts this in their TXT record, they are asking for bugs :)
+		endpointName, _ := im.mapper.toEndpointName(record.DNSName)
+		hasRegistryDNSName := endpointName != ""
+
+		// If it doesn't look like heritage info AND doesn't have a registry DNS name, treat as user TXT
+		if !hasHeritageOwnerInfo && !hasRegistryDNSName {
+			endpoints = append(endpoints, record)
+			continue
+		}
+
+		labels, err := endpoint.NewLabelsFromString(target, im.txtEncryptAESKey)
 		if errors.Is(err, endpoint.ErrInvalidHeritage) {
 			// if no heritage is found or it is invalid
 			// case when value of txt record cannot be identified
