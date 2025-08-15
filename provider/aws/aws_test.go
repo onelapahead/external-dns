@@ -2886,4 +2886,68 @@ func TestTXTRecordQuoteWrapping(t *testing.T) {
 	require.Len(t, aChange.ResourceRecordSet.ResourceRecords, 1)
 	// A record should not be wrapped in quotes
 	assert.Equal(t, "1.2.3.4", *aChange.ResourceRecordSet.ResourceRecords[0].Value)
+
+	// Test DELETE operation also wraps quotes
+	deleteChange := provider.newChange(route53types.ChangeActionDelete, txtEndpoint)
+	require.Len(t, deleteChange.ResourceRecordSet.ResourceRecords, 1)
+	// Should be wrapped in quotes for DELETE too
+	assert.Equal(t, "\"v=1;id=node1;addr=/ip4/10.0.0.1/tcp/30303\"", *deleteChange.ResourceRecordSet.ResourceRecords[0].Value)
+}
+
+func TestTXTRecordQuoteConsistency(t *testing.T) {
+	// Test that CREATE, UPDATE, and DELETE all handle quotes consistently
+	provider := &AWSProvider{}
+
+	// User provides unquoted TXT record value
+	testEndpoint := &endpoint.Endpoint{
+		DNSName:    "test.example.com",
+		RecordType: endpoint.RecordTypeTXT,
+		Targets:    []string{"v=1;id=enode1;addr=/ip4/10.0.0.1/tcp/30303"},
+	}
+
+	// All operations should add quotes to match Route 53 storage format
+	testActions := []route53types.ChangeAction{
+		route53types.ChangeActionCreate,
+		route53types.ChangeActionUpsert,
+		route53types.ChangeActionDelete,
+	}
+
+	for _, action := range testActions {
+		t.Run(string(action), func(t *testing.T) {
+			change := provider.newChange(action, testEndpoint)
+			require.Len(t, change.ResourceRecordSet.ResourceRecords, 1)
+			actual := *change.ResourceRecordSet.ResourceRecords[0].Value
+			expected := "\"v=1;id=enode1;addr=/ip4/10.0.0.1/tcp/30303\""
+			assert.Equal(t, expected, actual, "%s should wrap unquoted values in quotes", action)
+		})
+	}
+
+	// Test with already quoted user input (should not double-wrap)
+	quotedTestEndpoint := &endpoint.Endpoint{
+		DNSName:    "test.example.com",
+		RecordType: endpoint.RecordTypeTXT,
+		Targets:    []string{"\"already quoted\""},
+	}
+
+	quotedChange := provider.newChange(route53types.ChangeActionCreate, quotedTestEndpoint)
+	require.Len(t, quotedChange.ResourceRecordSet.ResourceRecords, 1)
+	assert.Equal(t, "\"already quoted\"", *quotedChange.ResourceRecordSet.ResourceRecords[0].Value,
+		"Should not double-wrap already quoted values")
+}
+
+func TestTXTRecordQuoteEdgeCases(t *testing.T) {
+	// Test edge cases for user-provided quotes
+	provider := &AWSProvider{}
+
+	// Test user-provided quoted value
+	userQuoted := &endpoint.Endpoint{
+		DNSName:    "test.example.com",
+		RecordType: endpoint.RecordTypeTXT,
+		Targets:    []string{"\"user provided quotes\""},
+	}
+
+	change := provider.newChange(route53types.ChangeActionCreate, userQuoted)
+	require.Len(t, change.ResourceRecordSet.ResourceRecords, 1)
+	// Should NOT double-wrap
+	assert.Equal(t, "\"user provided quotes\"", *change.ResourceRecordSet.ResourceRecords[0].Value)
 }

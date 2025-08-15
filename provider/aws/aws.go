@@ -941,8 +941,8 @@ func (p *AWSProvider) newChange(action route53types.ChangeAction, ep *endpoint.E
 			// AWS Route 53 requires TXT record values to be wrapped in quotes
 			processedVal := val
 			if ep.RecordType == endpoint.RecordTypeTXT {
-				// Only wrap in quotes if not already wrapped
-				if !strings.HasPrefix(val, "\"") || !strings.HasSuffix(val, "\"") {
+				// Only wrap in quotes if not already properly wrapped (both start and end)
+				if !(strings.HasPrefix(val, "\"") && strings.HasSuffix(val, "\"")) {
 					processedVal = fmt.Sprintf("\"%s\"", val)
 				}
 			}
