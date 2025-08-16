@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewEndpoint(t *testing.T) {
@@ -967,4 +968,59 @@ func TestEndpoint_UniqueOrderedTargets(t *testing.T) {
 			assert.Equal(t, tt.expected, ep.Targets)
 		})
 	}
+}
+
+// TestNewEndpointWithTTLPreservesDotsInTXTRecords tests that trailing dots are preserved in TXT records
+func TestNewEndpointWithTTLPreservesDotsInTXTRecords(t *testing.T) {
+	// TXT records should preserve trailing dots (and any arbitrary text)
+	txtEndpoint := NewEndpointWithTTL("example.com", RecordTypeTXT, TTL(300),
+		"v=1;some_signature=aBx3d5..",
+		"text.with.dots...",
+		"simple-text")
+
+	require.NotNil(t, txtEndpoint, "TXT endpoint should be created")
+	require.Len(t, txtEndpoint.Targets, 3, "should have 3 targets")
+
+	// All dots should be preserved in TXT targets
+	assert.Equal(t, "v=1;some_signature=aBx3d5..", txtEndpoint.Targets[0])
+	assert.Equal(t, "text.with.dots...", txtEndpoint.Targets[1])
+	assert.Equal(t, "simple-text", txtEndpoint.Targets[2])
+
+	// Domain name record types should still have trailing dots trimmed
+	aEndpoint := NewEndpointWithTTL("example.com", RecordTypeA, TTL(300), "1.2.3.4.")
+	require.NotNil(t, aEndpoint, "A endpoint should be created")
+	assert.Equal(t, "1.2.3.4", aEndpoint.Targets[0], "A record should have trailing dot trimmed")
+
+	cnameEndpoint := NewEndpointWithTTL("example.com", RecordTypeCNAME, TTL(300), "target.example.com.")
+	require.NotNil(t, cnameEndpoint, "CNAME endpoint should be created")
+	assert.Equal(t, "target.example.com", cnameEndpoint.Targets[0], "CNAME record should have trailing dot trimmed")
+}
+
+// TestTargetsOrderPreservation verifies that Targets.Same() doesn't mutate target ordering
+func TestTargetsOrderPreservation(t *testing.T) {
+	// Create targets in specific YAML order (not alphabetical)
+	originalTargets := NewTargets("other.text.woo=!", "please-delete all this", "other text")
+	comparisonTargets := NewTargets("other.text.woo=!", "please-delete all this", "other text")
+
+	// Verify they are considered the same
+	assert.True(t, originalTargets.Same(comparisonTargets), "Identical targets should be considered the same")
+
+	// Verify original ordering is preserved after comparison
+	assert.Equal(t, "other.text.woo=!", originalTargets[0], "First target should remain unchanged")
+	assert.Equal(t, "please-delete all this", originalTargets[1], "Second target should remain unchanged")
+	assert.Equal(t, "other text", originalTargets[2], "Third target should remain unchanged")
+
+	// Verify comparison targets are also preserved
+	assert.Equal(t, "other.text.woo=!", comparisonTargets[0], "Comparison first target should remain unchanged")
+	assert.Equal(t, "please-delete all this", comparisonTargets[1], "Comparison second target should remain unchanged")
+	assert.Equal(t, "other text", comparisonTargets[2], "Comparison third target should remain unchanged")
+
+	// Test with alphabetically different order that should still be equal
+	reorderedTargets := NewTargets("other text", "other.text.woo=!", "please-delete all this")
+	assert.True(t, originalTargets.Same(reorderedTargets), "Targets with same content but different order should be considered equal")
+
+	// Verify original targets still preserved
+	assert.Equal(t, "other.text.woo=!", originalTargets[0], "Original first target should remain unchanged after reordered comparison")
+	assert.Equal(t, "please-delete all this", originalTargets[1], "Original second target should remain unchanged after reordered comparison")
+	assert.Equal(t, "other text", originalTargets[2], "Original third target should remain unchanged after reordered comparison")
 }

@@ -57,6 +57,7 @@ type coreDNSProvider struct {
 	coreDNSPrefix string
 	domainFilter  *endpoint.DomainFilter
 	client        coreDNSClient
+	txtOwnerID    string
 }
 
 // Service represents CoreDNS etcd record
@@ -195,7 +196,7 @@ func newETCDClient() (coreDNSClient, error) {
 }
 
 // NewCoreDNSProvider is a CoreDNS provider constructor
-func NewCoreDNSProvider(domainFilter *endpoint.DomainFilter, prefix string, dryRun bool) (provider.Provider, error) {
+func NewCoreDNSProvider(domainFilter *endpoint.DomainFilter, prefix, txtOwnerID string, dryRun bool) (provider.Provider, error) {
 	client, err := newETCDClient()
 	if err != nil {
 		return nil, err
@@ -206,6 +207,7 @@ func NewCoreDNSProvider(domainFilter *endpoint.DomainFilter, prefix string, dryR
 		dryRun:        dryRun,
 		coreDNSPrefix: prefix,
 		domainFilter:  domainFilter,
+		txtOwnerID:    txtOwnerID,
 	}, nil
 }
 
@@ -239,6 +241,9 @@ func (p coreDNSProvider) Records(_ context.Context) ([]*endpoint.Endpoint, error
 	if err != nil {
 		return nil, err
 	}
+	// Group TXT services by dnsName to build multi-target endpoints
+	txtServicesByDNS := make(map[string][]*Service)
+
 	for _, service := range services {
 		domains := strings.Split(strings.TrimPrefix(service.Key, p.coreDNSPrefix), "/")
 		reverse(domains)
@@ -268,14 +273,44 @@ func (p coreDNSProvider) Records(_ context.Context) ([]*endpoint.Endpoint, error
 			result = append(result, ep)
 		}
 		if service.Text != "" {
-			ep := endpoint.NewEndpoint(
-				dnsName,
-				endpoint.RecordTypeTXT,
-				service.Text,
-			)
-			ep.Labels[randomPrefixLabel] = prefix
-			result = append(result, ep)
+			txtServicesByDNS[dnsName] = append(txtServicesByDNS[dnsName], service)
 		}
+	}
+
+	// Create multi-target TXT endpoints
+	for dnsName, txtServices := range txtServicesByDNS {
+		if len(txtServices) == 0 {
+			continue
+		}
+
+		var targets []string
+		labels := make(map[string]string)
+		var ttl uint32
+
+		for _, service := range txtServices {
+			targets = append(targets, service.Text)
+			domains := strings.Split(strings.TrimPrefix(service.Key, p.coreDNSPrefix), "/")
+			reverse(domains)
+			prefix := strings.Join(domains[:service.TargetStrip], ".")
+			labels[service.Text] = prefix
+			if ttl == 0 {
+				ttl = service.TTL
+			}
+		}
+
+		ep := endpoint.NewEndpointWithTTL(
+			dnsName,
+			endpoint.RecordTypeTXT,
+			endpoint.TTL(ttl),
+			targets...,
+		)
+		ep.Labels = labels
+		// Set a default prefix label if none exists
+		if ep.Labels[randomPrefixLabel] == "" {
+			ep.Labels[randomPrefixLabel] = "default"
+		}
+		ep.Labels[endpoint.OwnerLabelKey] = p.txtOwnerID
+		result = append(result, ep)
 	}
 	return result, nil
 }
@@ -384,45 +419,218 @@ func shouldSkipLabel(label string) bool {
 
 // updateTXTRecords updates the TXT records in the provided services slice based on the given group of endpoints.
 func (p coreDNSProvider) updateTXTRecords(dnsName string, group []*endpoint.Endpoint, services []*Service) []*Service {
-	index := 0
+	// Collect desired TXT targets in order (preserving user-defined order)
+	var orderedTargets []string
+	var targetTTL uint32
+	var labels map[string]string
+	
 	for _, ep := range group {
 		if ep.RecordType != endpoint.RecordTypeTXT {
 			continue
 		}
-		if index >= len(services) {
-			prefix := ep.Labels[randomPrefixLabel]
-			if prefix == "" {
-				prefix = fmt.Sprintf("%08x", rand.Int31())
-			}
-			services = append(services, &Service{
-				Key:         p.etcdKeyFor(prefix + "." + dnsName),
-				TargetStrip: strings.Count(prefix, ".") + 1,
-				TTL:         uint32(ep.RecordTTL),
-			})
+		if ep.Labels == nil {
+			ep.Labels = map[string]string{}
 		}
-		services[index].Text = ep.Targets[0]
-		index++
+		if labels == nil {
+			labels = ep.Labels
+		}
+		
+		// Append targets in the order they appear in the endpoint
+		for _, t := range ep.Targets {
+			orderedTargets = append(orderedTargets, t)
+			targetTTL = uint32(ep.RecordTTL)
+		}
 	}
 
-	for i := index; index > 0 && i < len(services); i++ {
-		services[i].Text = ""
+	if len(orderedTargets) == 0 {
+		// no TXT endpoints present
+		return services
 	}
+
+	// Clear existing TXT services that are no longer needed
+	for i, svc := range services {
+		if svc.Text != "" {
+			found := false
+			for _, target := range orderedTargets {
+				if target == svc.Text {
+					found = true
+					break
+				}
+			}
+			if !found {
+				services[i].Text = ""
+			}
+		}
+	}
+
+	// Check if we need to reorder existing targets based on current labels
+	needsReorder := p.checkIfReorderNeeded(orderedTargets, labels)
+	
+	if needsReorder {
+		// Clean up all existing TXT prefixes and regenerate with correct order
+		p.cleanupTXTLabels(labels, orderedTargets, dnsName)
+	}
+
+	// Create/update services for each target in order
+	for i, target := range orderedTargets {
+		prefix := labels[target]
+		if prefix == "" || needsReorder {
+			// Generate ordered prefix: index + random hex for uniqueness
+			prefix = fmt.Sprintf("%d-%06x", i, rand.Int31()&0xFFFFFF)
+		}
+		
+		svc := &Service{
+			Key:         p.etcdKeyFor(prefix + "." + dnsName),
+			TargetStrip: strings.Count(prefix, ".") + 1,
+			TTL:         targetTTL,
+			Text:        target,
+		}
+		services = append(services, svc)
+		labels[target] = prefix
+	}
+
+	// Cleanup stale TXT keys for targets that are no longer desired
+	for label, labelPrefix := range labels {
+		if shouldSkipLabel(label) {
+			continue
+		}
+		
+		found := false
+		for _, target := range orderedTargets {
+			if target == label {
+				found = true
+				break
+			}
+		}
+		
+		if !found {
+			key := p.etcdKeyFor(labelPrefix + "." + dnsName)
+			log.Infof("Delete key %s", key)
+			if !p.dryRun && p.client != nil {
+				if err := p.client.DeleteService(key); err != nil {
+					log.Warnf("Failed to delete stale TXT key %s: %v", key, err)
+				}
+			}
+		}
+	}
+
 	return services
+}
+
+// checkIfReorderNeeded determines if the current label prefixes match the expected order
+func (p coreDNSProvider) checkIfReorderNeeded(orderedTargets []string, labels map[string]string) bool {
+	// Count how many existing targets we have vs. total targets
+	existingTargets := 0
+	for _, target := range orderedTargets {
+		if labels[target] != "" {
+			existingTargets++
+		}
+	}
+	
+	// If we have fewer existing targets than total targets, new targets were added
+	// This requires reordering to maintain sequential indices
+	if existingTargets != len(orderedTargets) {
+		log.Debugf("Reorder needed: have %d existing targets, but %d total targets", existingTargets, len(orderedTargets))
+		return true
+	}
+	
+	// Check if all existing targets match their expected indices
+	for i, target := range orderedTargets {
+		prefix := labels[target]
+		if prefix == "" {
+			// New target, already handled above
+			continue
+		}
+		
+		// Check if prefix starts with the expected index
+		expectedPrefix := fmt.Sprintf("%d-", i)
+		if !strings.HasPrefix(prefix, expectedPrefix) {
+			log.Debugf("Reorder needed: target %q at index %d has prefix %q, expected prefix starting with %q", 
+				target, i, prefix, expectedPrefix)
+			return true
+		}
+	}
+	return false
+}
+
+// cleanupTXTLabels removes existing TXT prefixes that need reordering
+func (p coreDNSProvider) cleanupTXTLabels(labels map[string]string, orderedTargets []string, dnsName string) {
+	for _, target := range orderedTargets {
+		if prefix := labels[target]; prefix != "" {
+			key := p.etcdKeyFor(prefix + "." + dnsName)
+			log.Infof("Delete key for reordering %s", key)
+			if !p.dryRun && p.client != nil {
+				if err := p.client.DeleteService(key); err != nil {
+					log.Warnf("Failed to delete key for reordering %s: %v", key, err)
+				}
+			}
+			// Clear the prefix so it gets regenerated with correct order
+			delete(labels, target)
+		}
+	}
+}
+
+// deleteTXTRecordsForDNSName finds and deletes TXT services that match the specified targets
+func (p coreDNSProvider) deleteTXTRecordsForDNSName(dnsName string, targets []string) error {
+	// Convert DNS name to etcd path format
+	domains := strings.Split(dnsName, ".")
+	reverse(domains)
+	searchPrefix := p.coreDNSPrefix + strings.Join(domains, "/")
+
+	// Get all services under this DNS name
+	services, err := p.client.GetServices(searchPrefix)
+	if err != nil {
+		return err
+	}
+
+	// Create a set of targets to delete for efficient lookup
+	targetSet := make(map[string]bool)
+	for _, target := range targets {
+		targetSet[target] = true
+	}
+
+	// Find and delete matching TXT services
+	for _, service := range services {
+		// Only process TXT services (ones with text content and no host)
+		if service.Text != "" && service.Host == "" {
+			// Check if this TXT target should be deleted
+			if targetSet[service.Text] {
+				log.Infof("Delete TXT key %s", service.Key)
+				if p.dryRun {
+					continue
+				}
+				if err := p.client.DeleteService(service.Key); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 func (p coreDNSProvider) deleteEndpoints(endpoints []*endpoint.Endpoint) error {
 	for _, ep := range endpoints {
-		dnsName := ep.DNSName
-		if ep.Labels[randomPrefixLabel] != "" {
-			dnsName = ep.Labels[randomPrefixLabel] + "." + dnsName
-		}
-		key := p.etcdKeyFor(dnsName)
-		log.Infof("Delete key %s", key)
-		if p.dryRun {
-			continue
-		}
-		if err := p.client.DeleteService(key); err != nil {
-			return err
+		if ep.RecordType == endpoint.RecordTypeTXT {
+			// For TXT records, we need to find and delete all matching services from etcd
+			// since TXT records can have multiple targets stored as separate etcd keys
+			if err := p.deleteTXTRecordsForDNSName(ep.DNSName, ep.Targets); err != nil {
+				return err
+			}
+		} else {
+			// For non-TXT records, use standard deletion logic
+			dnsName := ep.DNSName
+			if ep.Labels[randomPrefixLabel] != "" {
+				dnsName = ep.Labels[randomPrefixLabel] + "." + dnsName
+			}
+			key := p.etcdKeyFor(dnsName)
+			log.Infof("Delete key %s", key)
+			if p.dryRun {
+				continue
+			}
+			if err := p.client.DeleteService(key); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

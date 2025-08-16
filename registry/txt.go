@@ -271,6 +271,9 @@ func (im *TXTRegistry) ApplyChanges(ctx context.Context, changes *plan.Changes) 
 	}
 
 	for _, r := range filteredChanges.Delete {
+		log.Tracef("TXT Registry processing deletion for endpoint: DNSName=%s, RecordType=%s, Targets=%v, Labels=%v",
+			r.DNSName, r.RecordType, r.Targets, r.Labels)
+
 		// when we delete TXT records for which value has changed (due to new label) this would still work because
 		// !!! TXT record value is uniquely generated from the Labels of the endpoint. Hence old TXT record can be uniquely reconstructed
 		// !!! After migration to the new TXT registry format we can drop records in old format here!!!

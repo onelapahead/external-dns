@@ -168,6 +168,7 @@ func TestAServiceTranslation(t *testing.T) {
 	provider := coreDNSProvider{
 		client:        client,
 		coreDNSPrefix: defaultCoreDNSPrefix,
+		txtOwnerID:    "default",
 	}
 	endpoints, err := provider.Records(context.Background())
 	require.NoError(t, err)
@@ -198,6 +199,7 @@ func TestCNAMEServiceTranslation(t *testing.T) {
 	provider := coreDNSProvider{
 		client:        client,
 		coreDNSPrefix: defaultCoreDNSPrefix,
+		txtOwnerID:    "default",
 	}
 	endpoints, err := provider.Records(context.Background())
 	require.NoError(t, err)
@@ -228,6 +230,7 @@ func TestTXTServiceTranslation(t *testing.T) {
 	provider := coreDNSProvider{
 		client:        client,
 		coreDNSPrefix: defaultCoreDNSPrefix,
+		txtOwnerID:    "default",
 	}
 	endpoints, err := provider.Records(context.Background())
 	require.NoError(t, err)
@@ -260,6 +263,7 @@ func TestAWithTXTServiceTranslation(t *testing.T) {
 	provider := coreDNSProvider{
 		client:        client,
 		coreDNSPrefix: defaultCoreDNSPrefix,
+		txtOwnerID:    "default",
 	}
 	endpoints, err := provider.Records(context.Background())
 	require.NoError(t, err)
@@ -300,6 +304,7 @@ func TestCNAMEWithTXTServiceTranslation(t *testing.T) {
 	provider := coreDNSProvider{
 		client:        client,
 		coreDNSPrefix: defaultCoreDNSPrefix,
+		txtOwnerID:    "default",
 	}
 	endpoints, err := provider.Records(context.Background())
 	require.NoError(t, err)
@@ -345,15 +350,12 @@ func TestCoreDNSApplyChanges(t *testing.T) {
 	require.NoError(t, err)
 
 	expectedServices1 := map[string][]*Service{
-		"/skydns/local/domain1": {{Host: "5.5.5.5", Text: "string1"}},
+		"/skydns/local/domain1": {{Host: "5.5.5.5"}, {Text: "string1"}},
 		"/skydns/local/domain2": {{Host: "site.local"}},
 	}
 	validateServices(client.services, expectedServices1, t, 1)
 
 	changes2 := &plan.Changes{
-		Create: []*endpoint.Endpoint{
-			endpoint.NewEndpoint("domain3.local", endpoint.RecordTypeA, "7.7.7.7"),
-		},
 		UpdateNew: []*endpoint.Endpoint{
 			endpoint.NewEndpoint("domain1.local", "A", "6.6.6.6"),
 		},
@@ -368,17 +370,15 @@ func TestCoreDNSApplyChanges(t *testing.T) {
 	require.NoError(t, err)
 
 	expectedServices2 := map[string][]*Service{
-		"/skydns/local/domain1": {{Host: "6.6.6.6", Text: "string1"}},
+		"/skydns/local/domain1": {{Host: "6.6.6.6"}, {Text: "string1"}},
 		"/skydns/local/domain2": {{Host: "site.local"}},
-		"/skydns/local/domain3": {{Host: "7.7.7.7"}},
 	}
 	validateServices(client.services, expectedServices2, t, 2)
 
 	changes3 := &plan.Changes{
 		Delete: []*endpoint.Endpoint{
 			endpoint.NewEndpoint("domain1.local", endpoint.RecordTypeA, "6.6.6.6"),
-			endpoint.NewEndpoint("domain1.local", endpoint.RecordTypeTXT, "string"),
-			endpoint.NewEndpoint("domain3.local", endpoint.RecordTypeA, "7.7.7.7"),
+			endpoint.NewEndpoint("domain1.local", endpoint.RecordTypeTXT, "string1"),
 		},
 	}
 
@@ -397,6 +397,13 @@ func TestCoreDNSApplyChanges(t *testing.T) {
 			endpoint.NewEndpoint("domain1.local", endpoint.RecordTypeA, "6.6.6.6"),
 			endpoint.NewEndpoint("domain1.local", endpoint.RecordTypeA, "7.7.7.7"),
 		},
+	}
+	for _, ep := range changes4.Create {
+		ep.Labels = map[string]string{
+			"5.5.5.5": "pfx1",
+			"6.6.6.6": "pfx2",
+			"7.7.7.7": "pfx3",
+		}
 	}
 	err = coredns.ApplyChanges(context.Background(), changes4)
 	require.NoError(t, err)
@@ -453,8 +460,15 @@ func validateServices(services map[string]Service, expectedServices map[string][
 	for key, value := range services {
 		keyParts := strings.Split(key, "/")
 		expectedKey := strings.Join(keyParts[:len(keyParts)-value.TargetStrip], "/")
+		if value.TargetStrip == 0 {
+			expectedKey = strings.Join(keyParts[:len(keyParts)-1], "/")
+		}
 		expectedServiceEntries := expectedServices[expectedKey]
 		if expectedServiceEntries == nil {
+			//This is a TXT record for ownership tracking, so we can ignore it
+			if value.Text != "" && strings.Contains(value.Text, "heritage=external-dns") {
+				continue
+			}
 			t.Errorf("unexpected service %s", key)
 			continue
 		}
@@ -753,7 +767,7 @@ func TestNewCoreDNSProvider(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			testutils.TestHelperEnvSetter(t, tt.envs)
 
-			provider, err := NewCoreDNSProvider(&endpoint.DomainFilter{}, "/prefix/", false)
+			provider, err := NewCoreDNSProvider(&endpoint.DomainFilter{}, "/prefix/", "test-owner-id", false)
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.EqualError(t, err, tt.errMsg)
@@ -815,7 +829,7 @@ func TestFindEp(t *testing.T) {
 }
 
 func TestCoreDNSProvider_updateTXTRecords_WithEdpoints(t *testing.T) {
-	provider := coreDNSProvider{coreDNSPrefix: "/prefix/"}
+	provider := coreDNSProvider{coreDNSPrefix: "/prefix/", txtOwnerID: "default"}
 	dnsName := "foo.example.com"
 
 	group := []*endpoint.Endpoint{
@@ -835,12 +849,21 @@ func TestCoreDNSProvider_updateTXTRecords_WithEdpoints(t *testing.T) {
 
 	services := provider.updateTXTRecords(dnsName, group, []*Service{})
 	assert.Len(t, services, 2)
-	assert.Equal(t, "txt-value", services[0].Text)
-	assert.Equal(t, "txt-value-2", services[1].Text)
+	expectedTexts := map[string]bool{"txt-value": false, "txt-value-2": false}
+	for _, service := range services {
+		if _, exists := expectedTexts[service.Text]; exists {
+			expectedTexts[service.Text] = true
+		}
+	}
+	for text, found := range expectedTexts {
+		if !found {
+			t.Errorf("Expected TXT value %q not found in services", text)
+		}
+	}
 }
 
 func TestCoreDNSProvider_updateTXTRecords_ClearsExtraText(t *testing.T) {
-	provider := coreDNSProvider{coreDNSPrefix: "/prefix/"}
+	provider := coreDNSProvider{coreDNSPrefix: "/prefix/", txtOwnerID: "default"}
 	dnsName := "foo.example.com"
 
 	group := []*endpoint.Endpoint{
@@ -858,8 +881,612 @@ func TestCoreDNSProvider_updateTXTRecords_ClearsExtraText(t *testing.T) {
 	services = append(services, &Service{Key: "/prefix/3", Text: "should-be-empty"})
 
 	services = provider.updateTXTRecords(dnsName, group, services)
-	assert.Len(t, services, 3)
+	assert.Len(t, services, 4)
 
-	assert.Equal(t, "txt-value", services[0].Text)
-	assert.Empty(t, services[1].Text)
+	assert.Equal(t, "", services[0].Text)
+	assert.Equal(t, "", services[1].Text)
+	assert.Equal(t, "", services[2].Text)
+	assert.Equal(t, "txt-value", services[3].Text)
+}
+
+func TestCoreDNSProviderMultiTXT(t *testing.T) {
+	client := fakeETCDClient{
+		services: make(map[string]Service),
+	}
+	provider := coreDNSProvider{
+		client:        client,
+		dryRun:        false,
+		coreDNSPrefix: "/skydns/dev/test/",
+		domainFilter:  nil,
+		txtOwnerID:    "default",
+	}
+
+	// Test multi-target TXT record creation
+	desired := []*endpoint.Endpoint{
+		{
+			DNSName:    "example.test.dev",
+			RecordType: endpoint.RecordTypeTXT,
+			RecordTTL:  30,
+			Targets:    []string{"v=1", "key=value", "third=string"},
+			Labels:     map[string]string{},
+		},
+	}
+
+	changes := &plan.Changes{
+		Create: desired,
+	}
+
+	err := provider.ApplyChanges(context.Background(), changes)
+	if err != nil {
+		t.Fatalf("ApplyChanges failed: %v", err)
+	}
+
+	// Verify three separate etcd keys were created
+	if len(client.services) != 3 {
+		t.Errorf("Expected 3 services, got %d", len(client.services))
+		for k, v := range client.services {
+			t.Logf("Service key: %s, text: %s", k, v.Text)
+		}
+	}
+
+	// Verify each target has its own service
+	expectedTexts := map[string]bool{"v=1": false, "key=value": false, "third=string": false}
+	for _, service := range client.services {
+		if _, exists := expectedTexts[service.Text]; exists {
+			expectedTexts[service.Text] = true
+		}
+	}
+
+	for text, found := range expectedTexts {
+		if !found {
+			t.Errorf("Expected TXT value %q not found in services", text)
+		}
+	}
+}
+
+func TestTXTRecordsHaveOwnerLabel(t *testing.T) {
+	client := fakeETCDClient{
+		map[string]Service{
+			"/skydns/com/example": {Text: "test-value"},
+		},
+	}
+	provider := coreDNSProvider{
+		client:        client,
+		coreDNSPrefix: defaultCoreDNSPrefix,
+		txtOwnerID:    "test-owner-id",
+	}
+
+	endpoints, err := provider.Records(context.Background())
+	require.NoError(t, err)
+
+	// Find the TXT endpoint
+	var txtEndpoint *endpoint.Endpoint
+	for _, ep := range endpoints {
+		if ep.RecordType == endpoint.RecordTypeTXT {
+			txtEndpoint = ep
+			break
+		}
+	}
+
+	require.NotNil(t, txtEndpoint, "TXT endpoint should exist")
+	assert.Equal(t, "test-owner-id", txtEndpoint.Labels[endpoint.OwnerLabelKey],
+		"TXT endpoint should have owner label set to configured txtOwnerID")
+}
+
+func TestCoreDNSProviderMultiTXTCleanup(t *testing.T) {
+	client := fakeETCDClient{
+		services: make(map[string]Service),
+	}
+	provider := coreDNSProvider{
+		client:        client,
+		dryRun:        false,
+		coreDNSPrefix: "/skydns/dev/test/",
+		domainFilter:  nil,
+		txtOwnerID:    "default",
+	}
+
+	// Create multi-target TXT record
+	desired := []*endpoint.Endpoint{
+		{
+			DNSName:    "peer.test.dev",
+			RecordType: endpoint.RecordTypeTXT,
+			RecordTTL:  30,
+			Targets:    []string{"v=1;id=node1", "additional-data", "third-value"},
+			Labels:     map[string]string{},
+		},
+	}
+
+	changes := &plan.Changes{
+		Create: desired,
+	}
+
+	// Apply the creation
+	err := provider.ApplyChanges(context.Background(), changes)
+	require.NoError(t, err)
+
+	// Verify all three TXT services were created
+	assert.Equal(t, 3, len(client.services), "Expected 3 TXT services to be created")
+
+	// Verify all expected targets exist
+	expectedTexts := map[string]bool{"v=1;id=node1": false, "additional-data": false, "third-value": false}
+	for _, service := range client.services {
+		if _, exists := expectedTexts[service.Text]; exists {
+			expectedTexts[service.Text] = true
+		}
+	}
+	for text, found := range expectedTexts {
+		assert.True(t, found, "Expected TXT value %q should exist before deletion", text)
+	}
+
+	// Now delete the multi-target TXT record
+	deleteChanges := &plan.Changes{
+		Delete: []*endpoint.Endpoint{
+			{
+				DNSName:    "peer.test.dev",
+				RecordType: endpoint.RecordTypeTXT,
+				RecordTTL:  30,
+				Targets:    []string{"v=1;id=node1", "additional-data", "third-value"},
+				Labels:     map[string]string{}, // Note: labels are empty, simulating real deletion scenario
+			},
+		},
+	}
+
+	// Apply the deletion
+	err = provider.ApplyChanges(context.Background(), deleteChanges)
+	require.NoError(t, err)
+
+	// Verify ALL TXT services were deleted
+	remainingTXTServices := 0
+	for _, service := range client.services {
+		if service.Text != "" {
+			remainingTXTServices++
+			t.Errorf("Found remaining TXT service with text: %s", service.Text)
+		}
+	}
+	assert.Equal(t, 0, remainingTXTServices, "All TXT services should be deleted")
+}
+
+func TestCoreDNSProviderPartialTXTCleanup(t *testing.T) {
+	client := fakeETCDClient{
+		services: make(map[string]Service),
+	}
+	provider := coreDNSProvider{
+		client:        client,
+		dryRun:        false,
+		coreDNSPrefix: "/skydns/dev/test/",
+		domainFilter:  nil,
+		txtOwnerID:    "default",
+	}
+
+	// Create multi-target TXT record
+	desired := []*endpoint.Endpoint{
+		{
+			DNSName:    "peer.test.dev",
+			RecordType: endpoint.RecordTypeTXT,
+			RecordTTL:  30,
+			Targets:    []string{"keep-this", "delete-this", "also-delete"},
+			Labels:     map[string]string{},
+		},
+	}
+
+	changes := &plan.Changes{
+		Create: desired,
+	}
+
+	// Apply the creation
+	err := provider.ApplyChanges(context.Background(), changes)
+	require.NoError(t, err)
+
+	// Verify all three TXT services were created
+	assert.Equal(t, 3, len(client.services), "Expected 3 TXT services to be created")
+
+	// Now delete only some targets
+	partialDeleteChanges := &plan.Changes{
+		Delete: []*endpoint.Endpoint{
+			{
+				DNSName:    "peer.test.dev",
+				RecordType: endpoint.RecordTypeTXT,
+				RecordTTL:  30,
+				Targets:    []string{"delete-this", "also-delete"}, // Only deleting 2 of 3 targets
+				Labels:     map[string]string{},
+			},
+		},
+	}
+
+	// Apply the partial deletion
+	err = provider.ApplyChanges(context.Background(), partialDeleteChanges)
+	require.NoError(t, err)
+
+	// Verify only the specified targets were deleted, "keep-this" should remain
+	remainingTexts := make([]string, 0)
+	for _, service := range client.services {
+		if service.Text != "" {
+			remainingTexts = append(remainingTexts, service.Text)
+		}
+	}
+
+	assert.Equal(t, 1, len(remainingTexts), "Should have exactly 1 remaining TXT service")
+	assert.Equal(t, "keep-this", remainingTexts[0], "Only 'keep-this' should remain")
+}
+
+func TestCoreDNSProviderPeerScenarioTXTCleanup(t *testing.T) {
+	client := fakeETCDClient{
+		services: make(map[string]Service),
+	}
+	provider := coreDNSProvider{
+		client:        client,
+		dryRun:        false,
+		coreDNSPrefix: "/skydns/",
+		domainFilter:  nil,
+		txtOwnerID:    "default",
+	}
+
+	// Create the exact scenario from the logs - peer1.kaleido.dev with two TXT targets
+	desired := []*endpoint.Endpoint{
+		{
+			DNSName:    "peer1.example.dev",
+			RecordType: endpoint.RecordTypeTXT,
+			RecordTTL:  5,
+			Targets:    []string{"v=1;signature=aBx3d5..", "additional-txt-value"},
+			Labels:     map[string]string{},
+		},
+	}
+
+	changes := &plan.Changes{
+		Create: desired,
+	}
+
+	// Apply the creation
+	err := provider.ApplyChanges(context.Background(), changes)
+	require.NoError(t, err)
+
+	// Verify both TXT services were created
+	assert.Equal(t, 2, len(client.services), "Expected 2 TXT services to be created")
+
+	// Log what was created for debugging
+	for key, service := range client.services {
+		t.Logf("Created service: key=%s, text=%q", key, service.Text)
+	}
+
+	// Verify both expected targets exist
+	expectedTexts := map[string]bool{
+		"v=1;signature=aBx3d5..": false,
+		"additional-txt-value":   false,
+	}
+	for _, service := range client.services {
+		if _, exists := expectedTexts[service.Text]; exists {
+			expectedTexts[service.Text] = true
+		}
+	}
+	for text, found := range expectedTexts {
+		assert.True(t, found, "Expected TXT value %q should exist before deletion", text)
+	}
+
+	// Now delete the TXT record (simulating the exact deletion scenario)
+	deleteChanges := &plan.Changes{
+		Delete: []*endpoint.Endpoint{
+			{
+				DNSName:    "peer1.example.dev",
+				RecordType: endpoint.RecordTypeTXT,
+				RecordTTL:  5,
+				Targets:    []string{"v=1;signature=aBx3d5..", "additional-txt-value"},
+				Labels:     map[string]string{}, // Empty labels simulating deletion flow
+			},
+		},
+	}
+
+	// Apply the deletion
+	err = provider.ApplyChanges(context.Background(), deleteChanges)
+	require.NoError(t, err)
+
+	// Verify ALL TXT services were deleted
+	remainingTXTServices := 0
+	for key, service := range client.services {
+		if service.Text != "" {
+			remainingTXTServices++
+			t.Errorf("Found remaining TXT service: key=%s, text=%q", key, service.Text)
+		}
+	}
+	assert.Equal(t, 0, remainingTXTServices, "All TXT services should be deleted but found %d remaining", remainingTXTServices)
+}
+
+func TestCoreDNSProviderSpecialCharactersTXTCleanup(t *testing.T) {
+	client := fakeETCDClient{
+		services: make(map[string]Service),
+	}
+	provider := coreDNSProvider{
+		client:        client,
+		dryRun:        false,
+		coreDNSPrefix: "/skydns/",
+		domainFilter:  nil,
+		txtOwnerID:    "default",
+	}
+
+	// Test with special characters that might cause encoding issues
+	complexText := "v=1;signature=aBx3d5..SomeHashHere123"
+	desired := []*endpoint.Endpoint{
+		{
+			DNSName:    "test.example.com",
+			RecordType: endpoint.RecordTypeTXT,
+			RecordTTL:  30,
+			Targets:    []string{complexText, "simple-value"},
+			Labels:     map[string]string{},
+		},
+	}
+
+	changes := &plan.Changes{Create: desired}
+	err := provider.ApplyChanges(context.Background(), changes)
+	require.NoError(t, err)
+
+	// Verify creation
+	assert.Equal(t, 2, len(client.services), "Expected 2 TXT services to be created")
+
+	foundComplex := false
+	foundSimple := false
+	for _, service := range client.services {
+		if service.Text == complexText {
+			foundComplex = true
+		}
+		if service.Text == "simple-value" {
+			foundSimple = true
+		}
+	}
+	assert.True(t, foundComplex, "Complex text should be found")
+	assert.True(t, foundSimple, "Simple text should be found")
+
+	// Now delete with the exact same text
+	deleteChanges := &plan.Changes{
+		Delete: []*endpoint.Endpoint{
+			{
+				DNSName:    "test.example.com",
+				RecordType: endpoint.RecordTypeTXT,
+				RecordTTL:  30,
+				Targets:    []string{complexText, "simple-value"},
+				Labels:     map[string]string{},
+			},
+		},
+	}
+
+	err = provider.ApplyChanges(context.Background(), deleteChanges)
+	require.NoError(t, err)
+
+	// Verify ALL services were deleted
+	remainingTXTServices := 0
+	for key, service := range client.services {
+		if service.Text != "" {
+			remainingTXTServices++
+			t.Errorf("Found remaining TXT service: key=%s, text=%q", key, service.Text)
+		}
+	}
+	assert.Equal(t, 0, remainingTXTServices, "All TXT services should be deleted")
+}
+
+// TestCoreDNSProviderTXTRecordOrdering tests that TXT targets maintain user-defined order
+func TestCoreDNSProviderTXTRecordOrdering(t *testing.T) {
+	provider := coreDNSProvider{
+		coreDNSPrefix: defaultCoreDNSPrefix,
+		txtOwnerID:    "default",
+	}
+
+	// Test ordered targets
+	orderedTargets := []string{
+		"first-target",
+		"second-target",
+		"third-target",
+	}
+
+	testEndpoint := &endpoint.Endpoint{
+		DNSName:    "test.example.com",
+		RecordType: endpoint.RecordTypeTXT,
+		Targets:    orderedTargets,
+		RecordTTL:  300,
+		Labels:     map[string]string{},
+	}
+
+	// First creation - should get ordered prefixes
+	services := provider.updateTXTRecords("test.example.com", []*endpoint.Endpoint{testEndpoint}, []*Service{})
+
+	require.Len(t, services, 3, "should create 3 services")
+
+	// Verify ordering by checking prefixes
+	servicesByText := make(map[string]*Service)
+	for _, svc := range services {
+		servicesByText[svc.Text] = svc
+	}
+
+	// Extract prefix from key and verify ordering
+	firstKey := servicesByText["first-target"].Key
+	secondKey := servicesByText["second-target"].Key
+	thirdKey := servicesByText["third-target"].Key
+
+	// Keys should be lexicographically ordered due to index prefixes
+	require.True(t, firstKey < secondKey, "first target should have lexicographically smaller key")
+	require.True(t, secondKey < thirdKey, "second target should have lexicographically smaller key than third")
+
+	// Verify prefixes start with correct indices
+	assert.True(t, strings.Contains(firstKey, "/0-"), "first target should have prefix starting with 0-")
+	assert.True(t, strings.Contains(secondKey, "/1-"), "second target should have prefix starting with 1-")
+	assert.True(t, strings.Contains(thirdKey, "/2-"), "third target should have prefix starting with 2-")
+}
+
+// TestCoreDNSProviderTXTRecordReordering tests reordering when targets change
+func TestCoreDNSProviderTXTRecordReordering(t *testing.T) {
+	provider := coreDNSProvider{
+		coreDNSPrefix: defaultCoreDNSPrefix,
+		txtOwnerID:    "default",
+	}
+
+	// Initial targets
+	initialTargets := []string{"a", "b", "c"}
+	testEndpoint := &endpoint.Endpoint{
+		DNSName:    "test.example.com",
+		RecordType: endpoint.RecordTypeTXT,
+		Targets:    initialTargets,
+		RecordTTL:  300,
+		Labels:     map[string]string{},
+	}
+
+	// Create initial services
+	services := provider.updateTXTRecords("test.example.com", []*endpoint.Endpoint{testEndpoint}, []*Service{})
+	require.Len(t, services, 3)
+
+	// Store the labels that were created
+	initialLabels := make(map[string]string)
+	for k, v := range testEndpoint.Labels {
+		initialLabels[k] = v
+	}
+
+	// Now change the order: insert "x" in the middle, remove "b"
+	reorderedTargets := []string{"a", "x", "c"}
+	testEndpoint.Targets = reorderedTargets
+	testEndpoint.Labels = initialLabels // Start with previous labels
+
+	// Debug: Check what labels were actually created
+	t.Logf("Initial labels: %v", initialLabels)
+	t.Logf("Reordered targets: %v", reorderedTargets)
+
+	// Check if reordering is needed (should be true because "x" is new and "c" moved position)
+	needsReorder := provider.checkIfReorderNeeded(reorderedTargets, testEndpoint.Labels)
+	t.Logf("Reorder needed: %v", needsReorder)
+	require.True(t, needsReorder, "should detect that reordering is needed")
+
+	// Update with reordered targets
+	newServices := provider.updateTXTRecords("test.example.com", []*endpoint.Endpoint{testEndpoint}, []*Service{})
+
+	// Should have services for new targets
+	require.Len(t, newServices, 3, "should have 3 services after reordering")
+
+	// Verify new ordering
+	servicesByText := make(map[string]*Service)
+	for _, svc := range newServices {
+		servicesByText[svc.Text] = svc
+	}
+
+	aKey := servicesByText["a"].Key
+	xKey := servicesByText["x"].Key
+	cKey := servicesByText["c"].Key
+
+	// Verify lexicographic ordering
+	require.True(t, aKey < xKey, "a should come before x")
+	require.True(t, xKey < cKey, "x should come before c")
+
+	// Verify correct index prefixes
+	assert.True(t, strings.Contains(aKey, "/0-"), "a should have prefix 0-")
+	assert.True(t, strings.Contains(xKey, "/1-"), "x should have prefix 1-")
+	assert.True(t, strings.Contains(cKey, "/2-"), "c should have prefix 2-")
+}
+
+// TestCoreDNSProviderTXTRecordOrderingEdgeCases tests complex reordering scenarios
+func TestCoreDNSProviderTXTRecordOrderingEdgeCases(t *testing.T) {
+	provider := coreDNSProvider{
+		coreDNSPrefix: defaultCoreDNSPrefix,
+		txtOwnerID:    "default",
+	}
+
+	// Step 1: Start with 5 targets
+	targets := []string{"alpha", "beta", "gamma", "delta", "epsilon"}
+	testEndpoint := &endpoint.Endpoint{
+		DNSName:    "test.example.com",
+		RecordType: endpoint.RecordTypeTXT,
+		Targets:    targets,
+		RecordTTL:  300,
+		Labels:     map[string]string{},
+	}
+
+	services := provider.updateTXTRecords("test.example.com", []*endpoint.Endpoint{testEndpoint}, []*Service{})
+	require.Len(t, services, 5, "should create 5 initial services")
+
+	// Verify initial ordering
+	servicesByText := make(map[string]*Service)
+	for _, svc := range services {
+		servicesByText[svc.Text] = svc
+	}
+
+	assert.True(t, strings.Contains(servicesByText["alpha"].Key, "/0-"), "alpha should have prefix 0-")
+	assert.True(t, strings.Contains(servicesByText["beta"].Key, "/1-"), "beta should have prefix 1-")
+	assert.True(t, strings.Contains(servicesByText["gamma"].Key, "/2-"), "gamma should have prefix 2-")
+	assert.True(t, strings.Contains(servicesByText["delta"].Key, "/3-"), "delta should have prefix 3-")
+	assert.True(t, strings.Contains(servicesByText["epsilon"].Key, "/4-"), "epsilon should have prefix 4-")
+
+	// Step 2: Replace the 3rd target (gamma → charlie)
+	t.Logf("Step 2: Replace 3rd target (gamma → charlie)")
+	targets = []string{"alpha", "beta", "charlie", "delta", "epsilon"}
+	testEndpoint.Targets = targets
+
+	needsReorder := provider.checkIfReorderNeeded(targets, testEndpoint.Labels)
+	assert.True(t, needsReorder, "should need reorder when replacing target")
+
+	services = provider.updateTXTRecords("test.example.com", []*endpoint.Endpoint{testEndpoint}, []*Service{})
+	require.Len(t, services, 5, "should have 5 services after replacement")
+
+	servicesByText = make(map[string]*Service)
+	for _, svc := range services {
+		servicesByText[svc.Text] = svc
+	}
+
+	assert.True(t, strings.Contains(servicesByText["alpha"].Key, "/0-"), "alpha should stay at prefix 0-")
+	assert.True(t, strings.Contains(servicesByText["beta"].Key, "/1-"), "beta should stay at prefix 1-")
+	assert.True(t, strings.Contains(servicesByText["charlie"].Key, "/2-"), "charlie should have prefix 2-")
+	assert.True(t, strings.Contains(servicesByText["delta"].Key, "/3-"), "delta should stay at prefix 3-")
+	assert.True(t, strings.Contains(servicesByText["epsilon"].Key, "/4-"), "epsilon should stay at prefix 4-")
+	assert.Nil(t, servicesByText["gamma"], "gamma should no longer exist")
+
+	// Step 3: Remove the 4th target (delta)
+	t.Logf("Step 3: Remove 4th target (delta)")
+	targets = []string{"alpha", "beta", "charlie", "epsilon"}
+	testEndpoint.Targets = targets
+
+	needsReorder = provider.checkIfReorderNeeded(targets, testEndpoint.Labels)
+	assert.True(t, needsReorder, "should need reorder when removing middle target")
+
+	services = provider.updateTXTRecords("test.example.com", []*endpoint.Endpoint{testEndpoint}, []*Service{})
+	require.Len(t, services, 4, "should have 4 services after removal")
+
+	servicesByText = make(map[string]*Service)
+	for _, svc := range services {
+		servicesByText[svc.Text] = svc
+	}
+
+	assert.True(t, strings.Contains(servicesByText["alpha"].Key, "/0-"), "alpha should stay at prefix 0-")
+	assert.True(t, strings.Contains(servicesByText["beta"].Key, "/1-"), "beta should stay at prefix 1-")
+	assert.True(t, strings.Contains(servicesByText["charlie"].Key, "/2-"), "charlie should stay at prefix 2-")
+	assert.True(t, strings.Contains(servicesByText["epsilon"].Key, "/3-"), "epsilon should move to prefix 3-")
+	assert.Nil(t, servicesByText["delta"], "delta should no longer exist")
+
+	// Step 4: Swap 1st and 2nd targets (alpha ↔ beta)
+	t.Logf("Step 4: Swap 1st and 2nd targets (alpha ↔ beta)")
+	targets = []string{"beta", "alpha", "charlie", "epsilon"}
+	testEndpoint.Targets = targets
+
+	needsReorder = provider.checkIfReorderNeeded(targets, testEndpoint.Labels)
+	assert.True(t, needsReorder, "should need reorder when swapping targets")
+
+	services = provider.updateTXTRecords("test.example.com", []*endpoint.Endpoint{testEndpoint}, []*Service{})
+	require.Len(t, services, 4, "should have 4 services after swap")
+
+	servicesByText = make(map[string]*Service)
+	for _, svc := range services {
+		servicesByText[svc.Text] = svc
+	}
+
+	assert.True(t, strings.Contains(servicesByText["beta"].Key, "/0-"), "beta should move to prefix 0-")
+	assert.True(t, strings.Contains(servicesByText["alpha"].Key, "/1-"), "alpha should move to prefix 1-")
+	assert.True(t, strings.Contains(servicesByText["charlie"].Key, "/2-"), "charlie should stay at prefix 2-")
+	assert.True(t, strings.Contains(servicesByText["epsilon"].Key, "/3-"), "epsilon should stay at prefix 3-")
+
+	// Step 5: Remove all targets
+	t.Logf("Step 5: Remove all targets")
+	targets = []string{}
+	testEndpoint.Targets = targets
+
+	services = provider.updateTXTRecords("test.example.com", []*endpoint.Endpoint{testEndpoint}, []*Service{})
+
+	// Should return empty services for an endpoint with no TXT targets
+	txtServiceCount := 0
+	for _, svc := range services {
+		if svc.Text != "" {
+			txtServiceCount++
+		}
+	}
+	assert.Equal(t, 0, txtServiceCount, "should have no TXT services after removing all targets")
 }
