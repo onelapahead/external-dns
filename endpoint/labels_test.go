@@ -200,3 +200,23 @@ func TestLabelsWithEqualsInValue(t *testing.T) {
 	require.Equal(t, "default", labels["owner"])
 	require.Equal(t, "default", labels["prefix"])
 }
+
+func TestLabelsRegistryRecordParsing(t *testing.T) {
+	// Test parsing the exact content from our logs that's failing
+	input := "heritage=external-dns,external-dns/owner=,external-dns/resource=crd/default/peer4-registry"
+
+	labels, err := NewLabelsFromStringPlain(input)
+	require.NoError(t, err, "should parse registry record content")
+
+	expected := Labels{
+		"owner":    "",
+		"resource": "crd/default/peer4-registry",
+	}
+
+	require.Equal(t, expected, labels, "should correctly parse registry labels with empty owner")
+
+	// Test serialization - this should recreate the full content
+	serialized := labels.SerializePlain(false)
+	expectedSerialized := "heritage=external-dns,external-dns/owner=,external-dns/resource=crd/default/peer4-registry"
+	require.Equal(t, expectedSerialized, serialized, "should serialize back to full registry content")
+}

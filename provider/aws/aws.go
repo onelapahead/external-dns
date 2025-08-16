@@ -516,6 +516,10 @@ func (p *AWSProvider) records(ctx context.Context, zones map[string]*profiledZon
 					targets := make([]string, len(r.ResourceRecords))
 					for idx, rr := range r.ResourceRecords {
 						targets[idx] = *rr.Value
+						// Debug logging for TXT records read from Route53
+						if r.Type == route53types.RRTypeTxt {
+							log.Infof("TXT READ from Route53 for %s: value %d: %q", *r.Name, idx, *rr.Value)
+						}
 					}
 
 					ep := endpoint.NewEndpointWithTTL(name, string(r.Type), ttl, targets...)
@@ -938,10 +942,20 @@ func (p *AWSProvider) newChange(action route53types.ChangeAction, ep *endpoint.E
 		}
 		change.ResourceRecordSet.ResourceRecords = make([]route53types.ResourceRecord, len(ep.Targets))
 		for idx, val := range ep.Targets {
-			change.ResourceRecordSet.ResourceRecords[idx] = route53types.ResourceRecord{
-				Value: aws.String(val),
+			// AWS Route 53 requires TXT record values to be wrapped in quotes
+			processedVal := val
+			if ep.RecordType == endpoint.RecordTypeTXT {
+				// Only wrap in quotes if not already properly wrapped (both start and end)
+				if !(strings.HasPrefix(val, "\"") && strings.HasSuffix(val, "\"")) {
+					processedVal = fmt.Sprintf("\"%s\"", val)
+				}
+				// Debug logging for TXT record operations
+				log.Infof("TXT %s for %s: original value: %q, processed value: %q", action, ep.DNSName, val, processedVal)
 			}
-			change.sizeBytes += len([]byte(val))
+			change.ResourceRecordSet.ResourceRecords[idx] = route53types.ResourceRecord{
+				Value: aws.String(processedVal),
+			}
+			change.sizeBytes += len([]byte(processedVal))
 			change.sizeValues += 1
 		}
 	}
