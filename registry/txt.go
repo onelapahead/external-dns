@@ -166,6 +166,10 @@ func (im *TXTRegistry) Records(ctx context.Context) ([]*endpoint.Endpoint, error
 			SetIdentifier: record.SetIdentifier,
 		}
 		labelMap[key] = labels
+		// Debug logging for TXT record mapping
+		if record.RecordType == endpoint.RecordTypeTXT {
+			log.Infof("TXT REGISTRY MAP: %s -> endpoint %s (type: %s), labels: %+v", record.DNSName, endpointName, recordType, labels)
+		}
 		txtRecordsMap[record.DNSName] = struct{}{}
 	}
 
@@ -196,6 +200,8 @@ func (im *TXTRegistry) Records(ctx context.Context) ([]*endpoint.Endpoint, error
 			key.RecordType = ""
 			labels, labelsExist = labelMap[key]
 		}
+		// Debug logging for label lookup
+		log.Infof("TXT REGISTRY LOOKUP: endpoint %s (type: %s) -> labels found: %t, labels: %+v", ep.DNSName, ep.RecordType, labelsExist, labels)
 		if labelsExist {
 			for k, v := range labels {
 				ep.Labels[k] = v
@@ -343,7 +349,11 @@ func newaffixNameMapper(prefix, suffix, wildcardReplacement string) affixNameMap
 // when not using '%{record_type}' in the prefix/suffix
 func extractRecordTypeDefaultPosition(name string) (string, string) {
 	nameS := strings.Split(name, "-")
-	for _, t := range getSupportedTypes() {
+	supportedTypes := getSupportedTypes()
+	// Add TXT to supported types for registry mapping when processing TXT records  
+	supportedTypes = append(supportedTypes, endpoint.RecordTypeTXT)
+	
+	for _, t := range supportedTypes {
 		if nameS[0] == strings.ToLower(t) {
 			return strings.TrimPrefix(name, nameS[0]+"-"), t
 		}

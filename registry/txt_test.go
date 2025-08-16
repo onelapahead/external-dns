@@ -1294,6 +1294,11 @@ func TestExtractRecordTypeDefaultPosition(t *testing.T) {
 			expectedType: "AAAA",
 		},
 		{
+			input:        "txt-zone.example.com",
+			expectedName: "zone.example.com",
+			expectedType: "TXT",
+		},
+		{
 			input:        "ptr-zone.example.com",
 			expectedName: "ptr-zone.example.com",
 			expectedType: "",

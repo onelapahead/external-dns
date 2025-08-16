@@ -516,6 +516,10 @@ func (p *AWSProvider) records(ctx context.Context, zones map[string]*profiledZon
 					targets := make([]string, len(r.ResourceRecords))
 					for idx, rr := range r.ResourceRecords {
 						targets[idx] = *rr.Value
+						// Debug logging for TXT records read from Route53
+						if r.Type == route53types.RRTypeTxt {
+							log.Infof("TXT READ from Route53 for %s: value %d: %q", *r.Name, idx, *rr.Value)
+						}
 					}
 
 					ep := endpoint.NewEndpointWithTTL(name, string(r.Type), ttl, targets...)
@@ -945,6 +949,8 @@ func (p *AWSProvider) newChange(action route53types.ChangeAction, ep *endpoint.E
 				if !(strings.HasPrefix(val, "\"") && strings.HasSuffix(val, "\"")) {
 					processedVal = fmt.Sprintf("\"%s\"", val)
 				}
+				// Debug logging for TXT record operations
+				log.Infof("TXT %s for %s: original value: %q, processed value: %q", action, ep.DNSName, val, processedVal)
 			}
 			change.ResourceRecordSet.ResourceRecords[idx] = route53types.ResourceRecord{
 				Value: aws.String(processedVal),
